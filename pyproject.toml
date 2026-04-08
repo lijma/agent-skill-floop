@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68.0", "setuptools-scm>=8.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "floop"
+version = "0.1.0"
+description = "AI-native prototype quality toolkit — Agent Skill + review workflow CLI"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+dependencies = [
+    "click>=8.1",
+]
+
+[project.scripts]
+floop = "floop.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
