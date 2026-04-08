@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "floop"
-version = "0.1.0"
+dynamic = ["version"]
 description = "AI-native prototype quality toolkit — Agent Skill + review workflow CLI"
 readme = "README.md"
 license = "MIT"
@@ -25,3 +25,6 @@ floop = "floop.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools_scm]
+version_scheme = "no-guess-dev"
