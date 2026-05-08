@@ -93,6 +93,37 @@ SKILLS = {
 **Everything in floop is iterative. There is no fixed sequence, no waterfall, no "done" phase.**
 The loop runs as many times as needed. The user can enter or re-enter at any step.
 
+## Complete Cycle: Build → Publish → Feedback → Iterate
+
+```
+┌── Build Prototype (Iteration Loop) ───────────────────────────────────────┐
+│  A → B → C → D → E → F (Confirm)                                          │
+│  ↺ Any step can loop back                                                 │
+└──────────────────────────────────────────────────────────────────────┬────┘
+                                                                        ↓
+                                                                   Deliver
+                                                            (floop review)
+                                                                        ↓
+                                                          Share review URL
+                                                                        ↓
+┌── Collect Feedback (floop-feedback skill) ────────────────────────────────┐
+│  Run `floop feedback` to check reviewer comments                          │
+│  Analyze priorities, identify common issues                               │
+└────────────────────────────────────────────────────────────────────┬──────┘
+                                                                     ↓
+                                                    Address feedback
+                                                    Return to Build
+                                                    Create new version
+                                                    Publish again
+                                                         ↓
+                                                    (loop continues)
+```
+
+**When to use each phase:**
+- **Build phase** (this skill): Creating or modifying the prototype
+- **Feedback phase** (floop-feedback skill): After publishing, when reviewers have added comments
+- **Return to Build**: When feedback analysis is complete and you're ready to implement changes
+
 ## Workflow
 
 ```
@@ -657,19 +688,69 @@ The user can run `floop feedback` multiple times throughout the review period to
 
 ## Integration with Prototype Iteration
 
-After analyzing feedback:
-1. Identify common themes or high-priority items
-2. Return to `floop-prototype` skill — enter at any loop step:
-   - **Token changes** → Step B (extend tokens)
-   - **Component refinement** → Step D (update components)
-   - **Page rebuild** → Step E (generate new HTML)
-3. Create a new version and publish again with `floop review`
-4. Return to this skill to collect feedback on the updated version
+After analyzing feedback, the typical workflow is:
+
+1. **Review comments** — run `floop feedback` to see all reviewer feedback
+2. **Prioritize changes** — identify critical/high-priority items
+3. **Implement fixes** — return to `floop-prototype` skill to make changes:
+   - **Token changes** → Step B (extend tokens if needed)
+   - **Component refinement** → Step D (update components.yaml)
+   - **Page rebuild** → Step E (modify and regenerate HTML files)
+4. **Create new version** — after making changes, publish the updated prototype with a new version number
+5. **Monitor new feedback** — return to this skill to collect feedback on the updated version
 
 This creates a continuous feedback loop:
 ```
 Build prototype → Publish review → Collect feedback → Iterate → Publish again
 ```
+
+---
+
+## Act on Feedback: Publish New Version After Changes
+
+When you've made changes based on feedback and are ready to publish a new version:
+
+**Step 1 — Ensure all changes are complete**
+- Verify all modified files are saved
+- Run `floop token validate` and `floop component validate` to check for errors
+- Run `floop prototype validate` to verify journey-map consistency
+- Run `floop preview` to confirm the prototype looks correct
+
+**Step 2 — Create a new version**
+
+Create a named snapshot with an incremented version number:
+```bash
+floop version create v1.1 -m "Addressed reviewer feedback: fixed layout issues, updated colors"
+```
+
+Use semantic versioning:
+- `v1.1`, `v1.2`, etc. for minor updates
+- `v2.0` for major redesigns
+- Include a descriptive message summarizing the changes
+
+**Step 3 — Publish the new version**
+
+Upload the new version to floop-server:
+```bash
+floop review --version v1.1 --json-output
+```
+
+**CRITICAL — After the command finishes:**
+- Parse the JSON output
+- Extract the new `shareUrl` and `previewUrl`
+- Present the URLs to the user
+- Tell the user: "New version v1.1 published. Share this link with reviewers to collect feedback on the updates."
+- Mention that previous comments remain on v1.0, and new comments will appear on v1.1
+
+**Step 4 — Continue monitoring**
+
+Return to this skill and run `floop feedback --version v1.1` to check for new comments on the updated version.
+
+**Version history:**
+- Each version is independent with its own comment thread
+- Reviewers can compare versions side-by-side on floop-server
+- Use `floop feedback` without `--version` to always check the latest version
+- Use `floop feedback --version v1.0` to review comments on a specific older version
 
 ---
 
