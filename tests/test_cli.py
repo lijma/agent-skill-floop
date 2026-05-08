@@ -9,6 +9,7 @@ from unittest.mock import patch
 import pytest
 from click.testing import CliRunner
 
+from floop import __version__
 from floop.cli import main
 
 
@@ -38,7 +39,7 @@ class TestMainGroup:
     def test_version(self, runner):
         result = runner.invoke(main, ["--version"])
         assert result.exit_code == 0
-        assert "0.1.0" in result.output
+        assert __version__ in result.output
 
     def test_help(self, runner):
         result = runner.invoke(main, ["--help"])
@@ -74,7 +75,9 @@ class TestInitCommand:
         runner.invoke(main, ["init", "--project-dir", str(tmp_path)])
         gitignore = tmp_path / ".floop" / ".gitignore"
         assert gitignore.exists()
-        assert "build/" in gitignore.read_text(encoding="utf-8")
+        content = gitignore.read_text(encoding="utf-8")
+        assert "build/" in content
+        assert "/floop.env" in content
 
     def test_init_config_has_version(self, runner, tmp_path):
         runner.invoke(main, ["init", "--project-dir", str(tmp_path)])
@@ -335,16 +338,16 @@ class TestPreviewCommand:
             mock_server.server_close.assert_called_once()
 
     def test_preview_shows_token_link(self, runner, project):
-        """preview generates index.html in build/ on each run."""
+        """preview starts without writing index.html into build/."""
         with patch("http.server.HTTPServer") as mock_server_cls:
             mock_server = mock_server_cls.return_value
             mock_server.serve_forever.side_effect = KeyboardInterrupt
 
             runner.invoke(main, ["preview", "--project-dir", str(project)])
-            assert (project / ".floop" / "build" / "index.html").exists()
+            assert not (project / ".floop" / "build" / "index.html").exists()
 
-    def test_preview_shows_prototype_links(self, runner, project):
-        """preview index.html includes nav entries for files in build/."""
+    def test_preview_uses_runtime_handler(self, runner, project):
+        """preview passes a virtual index handler to HTTPServer."""
         build_dir = project / ".floop" / "build"
         (build_dir / "design-tokens.html").write_text("<html></html>", encoding="utf-8")
         (build_dir / "home.html").write_text("<html></html>", encoding="utf-8")
@@ -354,9 +357,9 @@ class TestPreviewCommand:
             mock_server.serve_forever.side_effect = KeyboardInterrupt
 
             runner.invoke(main, ["preview", "--project-dir", str(project)])
-            index_html = (build_dir / "index.html").read_text(encoding="utf-8")
-            assert "design-tokens.html" in index_html
-            assert "home.html" in index_html
+            handler = mock_server_cls.call_args.args[1]
+            assert handler.__name__ == "PreviewRequestHandler"
+            assert not (build_dir / "index.html").exists()
 
     def test_preview_custom_port(self, runner, project):
         """Test --port option is accepted."""
@@ -370,7 +373,7 @@ class TestPreviewCommand:
             assert result.exit_code == 0
 
     def test_preview_version_flag(self, runner, project):
-        """--version flag is accepted and persists to index.html."""
+        """--version flag is accepted by the runtime handler."""
         build_dir = project / ".floop" / "build"
         (build_dir / "home.html").write_text("<html></html>", encoding="utf-8")
         versions_dir = project / ".floop" / "versions" / "v1.0"
@@ -388,17 +391,19 @@ class TestPreviewCommand:
                 main, ["preview", "--version", "v1.0", "--project-dir", str(project)]
             )
             assert result.exit_code == 0
-            index_html = (build_dir / "index.html").read_text(encoding="utf-8")
-            assert '"v1.0"' in index_html
+            handler = mock_server_cls.call_args.args[1]
+            assert handler.__name__ == "PreviewRequestHandler"
+            assert not (build_dir / "index.html").exists()
 
-    def test_preview_url_uses_build_path(self, runner, project):
-        """URL printed includes /build/ (server root is .floop/)."""
+    def test_preview_url_uses_root_path(self, runner, project):
+        """URL printed points at the virtual preview index."""
         with patch("http.server.HTTPServer") as mock_server_cls:
             mock_server = mock_server_cls.return_value
             mock_server.serve_forever.side_effect = KeyboardInterrupt
 
             result = runner.invoke(main, ["preview", "--project-dir", str(project)])
-            assert "/build/" in result.output
+            assert "http://127.0.0.1:" in result.output
+            assert "/build/" not in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -447,6 +452,369 @@ class TestVersionCommand:
         result = runner.invoke(main, ["version", "list", "--project-dir", str(project)])
         assert result.exit_code == 0
         assert "v1.0" in result.output
+
+
+# ---------------------------------------------------------------------------
+# floop review
+# ---------------------------------------------------------------------------
+
+
+class TestReviewCommand:
+    def _create_version(self, runner, project):
+        build_dir = project / ".floop" / "build"
+        journey_dir = build_dir / "journey"
+        journey_dir.mkdir()
+        (journey_dir / "home.html").write_text("<html></html>", encoding="utf-8")
+        runner.invoke(main, ["version", "create", "v1.0", "--project-dir", str(project)])
+
+    def test_review_without_floop_dir(self, runner, tmp_path):
+        result = runner.invoke(main, ["review", "--project-dir", str(tmp_path)])
+        assert result.exit_code != 0
+        assert ".floop" in result.output
+
+    def test_review_uploads_version(self, runner, project):
+        self._create_version(runner, project)
+        with patch("floop.review.upload_review") as mock_upload:
+            mock_upload.return_value = {
+                "projectId": "proj_1",
+                "versionId": "ver_1",
+                "status": "ready",
+                "previewUrl": "https://server.example/p/ver_1",
+                "shareUrl": "https://server.example/s/shr_1",
+            }
+            result = runner.invoke(
+                main,
+                [
+                    "review",
+                    "--server-url",
+                    "https://server.example",
+                    "--project-key",
+                    "proj_1",
+                    "--api-key",
+                    "flp_secret",
+                    "--version",
+                    "v1.0",
+                    "--project-dir",
+                    str(project),
+                ],
+            )
+        assert result.exit_code == 0
+        assert "Review version uploaded" in result.output
+        assert "https://server.example/s/shr_1" in result.output
+        mock_upload.assert_called_once()
+        config = json.loads((project / ".floop" / "config.json").read_text(encoding="utf-8"))
+        assert "review" not in config
+        env_content = (project / ".floop" / "floop.env").read_text(encoding="utf-8")
+        assert "FLOOP_SERVER_URL=https://server.example" in env_content
+        assert "FLOOP_PROJECT_KEY=proj_1" in env_content
+        assert "FLOOP_API_KEY=flp_secret" in env_content
+
+    def test_review_uses_floop_env_without_prompts(self, runner, project):
+        self._create_version(runner, project)
+        (project / ".floop" / "floop.env").write_text(
+            "FLOOP_SERVER_URL=https://env.example\n"
+            "FLOOP_PROJECT_KEY=proj_env\n"
+            "FLOOP_API_KEY=flp_env_file\n",
+            encoding="utf-8",
+        )
+        with patch("floop.review.upload_review") as mock_upload:
+            mock_upload.return_value = {
+                "projectId": "proj_env",
+                "versionId": "ver_1",
+                "status": "ready",
+                "previewUrl": "https://env.example/p/ver_1",
+                "shareUrl": "https://env.example/s/shr_1",
+            }
+            result = runner.invoke(
+                main,
+                ["review", "--version", "v1.0", "--project-dir", str(project)],
+            )
+
+        assert result.exit_code == 0
+        assert "First-time floop review setup" not in result.output
+        assert mock_upload.call_args.kwargs["server_url"] == "https://env.example"
+        assert mock_upload.call_args.kwargs["project_key"] == "proj_env"
+        assert mock_upload.call_args.kwargs["api_key"] == "flp_env_file"
+
+    def test_review_accepts_project_key(self, runner, project):
+        self._create_version(runner, project)
+        with patch("floop.review.upload_review") as mock_upload:
+            mock_upload.return_value = {
+                "projectId": "proj_key",
+                "versionId": "ver_1",
+                "status": "ready",
+                "previewUrl": "https://server.example/p/ver_1",
+                "shareUrl": "https://server.example/s/shr_1",
+            }
+            result = runner.invoke(
+                main,
+                [
+                    "review",
+                    "--server-url",
+                    "https://server.example",
+                    "--project-key",
+                    "proj_key",
+                    "--api-key",
+                    "flp_secret",
+                    "--version",
+                    "v1.0",
+                    "--project-dir",
+                    str(project),
+                ],
+            )
+
+        assert result.exit_code == 0
+        assert mock_upload.call_args.kwargs["project_key"] == "proj_key"
+
+    def test_review_json_output_uses_env_api_key(self, runner, project, monkeypatch):
+        self._create_version(runner, project)
+        monkeypatch.setenv("FLOOP_API_KEY", "flp_env")
+        with patch("floop.review.upload_review") as mock_upload:
+            mock_upload.return_value = {
+                "projectId": "proj_1",
+                "versionId": "ver_1",
+                "status": "ready",
+                "previewUrl": "https://server.example/p/ver_1",
+                "shareUrl": "https://server.example/s/shr_1",
+            }
+            result = runner.invoke(
+                main,
+                [
+                    "review",
+                    "--server-url",
+                    "https://server.example",
+                    "--project-key",
+                    "proj_1",
+                    "--json-output",
+                    "--project-dir",
+                    str(project),
+                ],
+            )
+        assert result.exit_code == 0
+        payload = json.loads(result.output)
+        assert payload["shareUrl"] == "https://server.example/s/shr_1"
+        assert mock_upload.call_args.kwargs["api_key"] == "flp_env"
+
+    def test_review_missing_settings_creates_env_template(self, runner, project):
+        self._create_version(runner, project)
+        with patch("floop.review.upload_review") as mock_upload:
+            result = runner.invoke(
+                main,
+                ["review", "--project-dir", str(project)],
+            )
+        assert result.exit_code == 0
+        assert "setup required" in result.output
+        assert "floop.env" in result.output
+        assert "Missing: FLOOP_API_KEY, FLOOP_PROJECT_KEY" in result.output
+        assert "NEXT: run 'floop review set' now" in result.output
+        assert "not a build/upload failure" in result.output
+        env_content = (
+            project / ".floop" / "floop.env"
+        ).read_text(encoding="utf-8")
+        assert "FLOOP_PROJECT_KEY=<project-key>" in env_content
+        assert "FLOOP_PROJECT_ID" not in env_content
+        mock_upload.assert_not_called()
+
+    def test_review_missing_settings_json_output_is_successful(self, runner, project):
+        self._create_version(runner, project)
+        with patch("floop.review.upload_review") as mock_upload:
+            result = runner.invoke(
+                main,
+                ["review", "--json-output", "--project-dir", str(project)],
+            )
+
+        assert result.exit_code == 0
+        payload = json.loads(result.output)
+        assert payload["status"] == "setup_required"
+        assert payload["uploaded"] is False
+        assert payload["missing"] == ["FLOOP_API_KEY", "FLOOP_PROJECT_KEY"]
+        assert payload["nextCommand"] == "floop review set"
+        mock_upload.assert_not_called()
+
+    def test_review_set_uses_single_project(self, runner, project):
+        with patch("floop.review.list_review_projects") as mock_list:
+            mock_list.return_value = [
+                {"id": "prj_1", "name": "Demo", "slug": "demo", "status": "active"}
+            ]
+            result = runner.invoke(
+                main,
+                [
+                    "review",
+                    "set",
+                    "--server-url",
+                    "https://server.example",
+                    "--api-key",
+                    "flp_secret",
+                    "--project-dir",
+                    str(project),
+                ],
+            )
+
+        assert result.exit_code == 0
+        assert "settings saved" in result.output
+        assert "next: floop review --json-output" in result.output
+        env_content = (project / ".floop" / "floop.env").read_text(encoding="utf-8")
+        assert "FLOOP_SERVER_URL=https://server.example" in env_content
+        assert "FLOOP_PROJECT_KEY=prj_1" in env_content
+        assert "FLOOP_API_KEY=flp_secret" in env_content
+
+    def test_review_set_creates_project_when_none_exists(self, runner, project):
+        with patch("floop.review.list_review_projects") as mock_list:
+            with patch("floop.review.create_review_project") as mock_create:
+                mock_list.return_value = []
+                mock_create.return_value = {"id": "prj_new", "name": "New", "slug": "new"}
+                result = runner.invoke(
+                    main,
+                    [
+                        "review",
+                        "set",
+                        "--api-key",
+                        "flp_secret",
+                        "--project-name",
+                        "New",
+                        "--json-output",
+                        "--project-dir",
+                        str(project),
+                    ],
+                )
+
+        assert result.exit_code == 0
+        payload = json.loads(result.output)
+        assert payload["projectKey"] == "prj_new"
+        assert mock_create.call_args.kwargs["name"] == "New"
+
+    def test_review_set_uses_project_dir_name_when_creating(self, runner, project):
+        with patch("floop.review.list_review_projects") as mock_list:
+            with patch("floop.review.create_review_project") as mock_create:
+                mock_list.return_value = []
+                mock_create.return_value = {"id": "prj_new", "name": project.name, "slug": project.name}
+                result = runner.invoke(
+                    main,
+                    [
+                        "review",
+                        "set",
+                        "--api-key",
+                        "flp_secret",
+                        "--project-dir",
+                        str(project),
+                    ],
+                )
+
+        assert result.exit_code == 0
+        assert mock_create.call_args.kwargs["name"] == project.name
+
+    def test_review_set_selects_multiple_projects(self, runner, project):
+        with patch("floop.review.list_review_projects") as mock_list:
+            mock_list.return_value = [
+                {"id": "prj_1", "name": "One", "slug": "one", "status": "active"},
+                {"id": "prj_2", "name": "Two", "slug": "two", "status": "active"},
+            ]
+            result = runner.invoke(
+                main,
+                [
+                    "review",
+                    "set",
+                    "--api-key",
+                    "flp_secret",
+                    "--project-dir",
+                    str(project),
+                ],
+                input="2\n",
+            )
+
+        assert result.exit_code == 0
+        assert "Multiple floop projects found" in result.output
+        assert "One (prj_1)" in result.output
+        assert "Two (prj_2)" in result.output
+        env_content = (project / ".floop" / "floop.env").read_text(encoding="utf-8")
+        assert "FLOOP_PROJECT_KEY=prj_2" in env_content
+
+    def test_review_set_rejects_unknown_project_key(self, runner, project):
+        with patch("floop.review.list_review_projects") as mock_list:
+            mock_list.return_value = [
+                {"id": "prj_1", "name": "One", "slug": "one", "status": "active"}
+            ]
+            result = runner.invoke(
+                main,
+                [
+                    "review",
+                    "set",
+                    "--api-key",
+                    "flp_secret",
+                    "--project-key",
+                    "prj_missing",
+                    "--project-dir",
+                    str(project),
+                ],
+            )
+
+        assert result.exit_code != 0
+        assert "Project key not found" in result.output
+
+    def test_review_set_accepts_known_project_key(self, runner, project):
+        with patch("floop.review.list_review_projects") as mock_list:
+            mock_list.return_value = [
+                {"id": "prj_1", "name": "One", "slug": "one", "status": "active"}
+            ]
+            result = runner.invoke(
+                main,
+                [
+                    "review",
+                    "set",
+                    "--api-key",
+                    "flp_secret",
+                    "--project-key",
+                    "prj_1",
+                    "--project-dir",
+                    str(project),
+                ],
+            )
+
+        assert result.exit_code == 0
+        env_content = (project / ".floop" / "floop.env").read_text(encoding="utf-8")
+        assert "FLOOP_PROJECT_KEY=prj_1" in env_content
+
+    def test_review_set_prompts_for_api_key(self, runner, project):
+        with patch("floop.review.list_review_projects") as mock_list:
+            mock_list.return_value = [
+                {"id": "prj_1", "name": "Demo", "slug": "demo", "status": "active"}
+            ]
+            result = runner.invoke(
+                main,
+                ["review", "set", "--project-dir", str(project)],
+                input="flp_prompt\n",
+            )
+
+        assert result.exit_code == 0
+        assert mock_list.call_args.kwargs["api_key"] == "flp_prompt"
+
+    def test_review_set_without_floop_dir(self, runner, tmp_path):
+        result = runner.invoke(main, ["review", "set", "--project-dir", str(tmp_path)])
+
+        assert result.exit_code != 0
+        assert ".floop" in result.output
+
+    def test_review_handles_upload_error(self, runner, project):
+        self._create_version(runner, project)
+        from floop.review import ReviewError
+
+        with patch("floop.review.upload_review", side_effect=ReviewError("boom")):
+            result = runner.invoke(
+                main,
+                [
+                    "review",
+                    "--server-url",
+                    "https://server.example",
+                    "--project-key",
+                    "proj_1",
+                    "--api-key",
+                    "flp_secret",
+                    "--project-dir",
+                    str(project),
+                ],
+            )
+        assert result.exit_code != 0
+        assert "boom" in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -505,3 +873,370 @@ class TestJourneyCheckCommand:
         )
         assert result.exit_code == 0
         assert "⚠" in result.output
+
+
+class TestFeedbackCommand:
+    def test_feedback_without_floop_dir(self, runner, tmp_path):
+        result = runner.invoke(main, ["feedback", "--project-dir", str(tmp_path)])
+        assert result.exit_code != 0
+        assert ".floop/" in result.output
+
+    def test_feedback_without_floop_dir(self, runner, tmp_path):
+        result = runner.invoke(main, ["feedback", "--project-dir", str(tmp_path)])
+        assert result.exit_code != 0
+        assert ".floop/" in result.output
+
+    def test_feedback_missing_config(self, runner, project):
+        result = runner.invoke(main, ["feedback", "--project-dir", str(project)])
+        assert result.exit_code == 0
+        assert "Review settings not configured" in result.output
+        assert "FLOOP_SERVER_URL" in result.output
+        assert "floop review set" in result.output
+
+    def test_feedback_missing_config_json(self, runner, project):
+        result = runner.invoke(main, ["feedback", "--project-dir", str(project), "--json-output"])
+        assert result.exit_code == 0
+        payload = json.loads(result.output)
+        assert payload["error"] == "SETUP_REQUIRED"
+        assert "FLOOP_SERVER_URL" in payload["missing"]
+
+    def test_feedback_no_versions(self, runner, project):
+        from unittest.mock import patch
+
+        (project / ".floop" / "floop.env").write_text(
+            "FLOOP_SERVER_URL=https://server.example\n"
+            "FLOOP_PROJECT_KEY=proj_1\n"
+            "FLOOP_API_KEY=flp_secret\n",
+            encoding="utf-8",
+        )
+
+        with patch("floop.review.list_review_versions") as mock_list:
+            mock_list.return_value = []
+
+            result = runner.invoke(main, ["feedback", "--project-dir", str(project)])
+
+        assert result.exit_code == 0
+        assert "No versions found" in result.output
+        assert "floop review" in result.output
+
+    def test_feedback_no_versions_json(self, runner, project):
+        from unittest.mock import patch
+
+        (project / ".floop" / "floop.env").write_text(
+            "FLOOP_SERVER_URL=https://server.example\n"
+            "FLOOP_PROJECT_KEY=proj_1\n"
+            "FLOOP_API_KEY=flp_secret\n",
+            encoding="utf-8",
+        )
+
+        with patch("floop.review.list_review_versions") as mock_list:
+            mock_list.return_value = []
+
+            result = runner.invoke(main, ["feedback", "--project-dir", str(project), "--json-output"])
+
+        assert result.exit_code == 0
+        payload = json.loads(result.output)
+        assert "comments" in payload
+        assert len(payload["comments"]) == 0
+        assert "No versions found" in payload["message"]
+
+    def test_feedback_shows_comments(self, runner, project):
+        from unittest.mock import patch
+
+        (project / ".floop" / "floop.env").write_text(
+            "FLOOP_SERVER_URL=https://server.example\n"
+            "FLOOP_PROJECT_KEY=proj_1\n"
+            "FLOOP_API_KEY=flp_secret\n",
+            encoding="utf-8",
+        )
+
+        versions_data = [
+            {
+                "versionId": "ver_1",
+                "versionLabel": "v1.0",
+                "status": "ready",
+                "uploadedAt": "2026-05-08T00:00:00Z",
+            }
+        ]
+
+        comments_data = [
+            {
+                "id": "cmt_1",
+                "authorName": "Reviewer",
+                "body": "Great work!",
+                "status": "open",
+                "priority": "medium",
+            },
+            {
+                "id": "cmt_2",
+                "authorName": "Designer",
+                "body": "Change button color",
+                "status": "open",
+                "priority": "high",
+            },
+        ]
+
+        with patch("floop.review.list_review_versions") as mock_list:
+            with patch("floop.review.get_review_comments") as mock_comments:
+                mock_list.return_value = versions_data
+                mock_comments.return_value = comments_data
+
+                result = runner.invoke(main, ["feedback", "--project-dir", str(project)])
+
+        assert result.exit_code == 0
+        assert "Review Feedback for 'v1.0'" in result.output
+        assert "Total comments: 2" in result.output
+        assert "Open: 2" in result.output
+
+    def test_feedback_json_output(self, runner, project):
+        from unittest.mock import patch
+
+        (project / ".floop" / "floop.env").write_text(
+            "FLOOP_SERVER_URL=https://server.example\n"
+            "FLOOP_PROJECT_KEY=proj_1\n"
+            "FLOOP_API_KEY=flp_secret\n",
+            encoding="utf-8",
+        )
+
+        versions_data = [
+            {
+                "versionId": "ver_1",
+                "versionLabel": "v1.0",
+                "status": "ready",
+                "uploadedAt": "2026-05-08T00:00:00Z",
+            }
+        ]
+
+        comments_data = [
+            {
+                "id": "cmt_1",
+                "authorName": "Reviewer",
+                "body": "Great work!",
+                "status": "open",
+                "priority": "medium",
+            }
+        ]
+
+        with patch("floop.review.list_review_versions") as mock_list:
+            with patch("floop.review.get_review_comments") as mock_comments:
+                mock_list.return_value = versions_data
+                mock_comments.return_value = comments_data
+
+                result = runner.invoke(
+                    main,
+                    ["feedback", "--project-dir", str(project), "--json-output"],
+                )
+
+        assert result.exit_code == 0
+        payload = json.loads(result.output)
+        assert payload["versionId"] == "ver_1"
+        assert payload["versionLabel"] == "v1.0"
+        assert payload["commentCount"] == 1
+        assert len(payload["comments"]) == 1
+
+    def test_feedback_with_specific_version(self, runner, project):
+        from unittest.mock import patch
+
+        (project / ".floop" / "floop.env").write_text(
+            "FLOOP_SERVER_URL=https://server.example\n"
+            "FLOOP_PROJECT_KEY=proj_1\n"
+            "FLOOP_API_KEY=flp_secret\n",
+            encoding="utf-8",
+        )
+
+        versions_data = [
+            {
+                "versionId": "ver_1",
+                "versionLabel": "v1.0",
+                "status": "ready",
+                "uploadedAt": "2026-05-08T00:00:00Z",
+            },
+            {
+                "versionId": "ver_2",
+                "versionLabel": "v2.0",
+                "status": "ready",
+                "uploadedAt": "2026-05-09T00:00:00Z",
+            }
+        ]
+
+        comments_data = [
+            {
+                "id": "cmt_1",
+                "authorName": "Reviewer",
+                "body": "Looks good!",
+                "status": "open",
+                "priority": "low",
+            }
+        ]
+
+        with patch("floop.review.list_review_versions") as mock_list:
+            with patch("floop.review.get_review_comments") as mock_comments:
+                mock_list.return_value = versions_data
+                mock_comments.return_value = comments_data
+
+                result = runner.invoke(
+                    main,
+                    ["feedback", "--version", "v1.0", "--project-dir", str(project)],
+                )
+
+        assert result.exit_code == 0
+        assert "v1.0" in result.output
+        assert "Total comments: 1" in result.output
+        mock_comments.assert_called_once_with(
+            server_url="https://server.example",
+            project_key="proj_1",
+            version_id="ver_1",
+            api_key="flp_secret",
+        )
+
+    def test_feedback_version_not_found(self, runner, project):
+        from unittest.mock import patch
+
+        (project / ".floop" / "floop.env").write_text(
+            "FLOOP_SERVER_URL=https://server.example\n"
+            "FLOOP_PROJECT_KEY=proj_1\n"
+            "FLOOP_API_KEY=flp_secret\n",
+            encoding="utf-8",
+        )
+
+        versions_data = [
+            {
+                "versionId": "ver_1",
+                "versionLabel": "v1.0",
+                "status": "ready",
+                "uploadedAt": "2026-05-08T00:00:00Z",
+            },
+            {
+                "versionId": "ver_2",
+                "status": "ready",
+                "uploadedAt": "2026-05-07T00:00:00Z",
+            }
+        ]
+
+        with patch("floop.review.list_review_versions") as mock_list:
+            mock_list.return_value = versions_data
+
+            result = runner.invoke(
+                main,
+                ["feedback", "--version", "v2.0", "--project-dir", str(project)],
+            )
+
+        assert result.exit_code == 0
+        assert "Version 'v2.0' not found" in result.output
+        assert "Available versions:" in result.output
+        assert "v1.0" in result.output
+        assert "ver_2" in result.output
+
+    def test_feedback_version_not_found_json(self, runner, project):
+        from unittest.mock import patch
+
+        (project / ".floop" / "floop.env").write_text(
+            "FLOOP_SERVER_URL=https://server.example\n"
+            "FLOOP_PROJECT_KEY=proj_1\n"
+            "FLOOP_API_KEY=flp_secret\n",
+            encoding="utf-8",
+        )
+
+        versions_data = [
+            {
+                "versionId": "ver_1",
+                "versionLabel": "v1.0",
+                "status": "ready",
+                "uploadedAt": "2026-05-08T00:00:00Z",
+            },
+            {
+                "versionId": "ver_2",
+                "status": "ready",
+                "uploadedAt": "2026-05-07T00:00:00Z",
+            }
+        ]
+
+        with patch("floop.review.list_review_versions") as mock_list:
+            mock_list.return_value = versions_data
+
+            result = runner.invoke(
+                main,
+                ["feedback", "--version", "v2.0", "--project-dir", str(project), "--json-output"],
+            )
+
+        assert result.exit_code == 0
+        payload = json.loads(result.output)
+        assert payload["error"] == "VERSION_NOT_FOUND"
+        assert "v1.0" in payload["availableVersions"]
+        assert "ver_2" in payload["availableVersions"]
+
+    def test_feedback_handles_review_error(self, runner, project):
+        from unittest.mock import patch
+
+        (project / ".floop" / "floop.env").write_text(
+            "FLOOP_SERVER_URL=https://server.example\n"
+            "FLOOP_PROJECT_KEY=proj_1\n"
+            "FLOOP_API_KEY=flp_secret\n",
+            encoding="utf-8",
+        )
+
+        with patch("floop.review.list_review_versions") as mock_list:
+            from floop.review import ReviewError
+            mock_list.side_effect = ReviewError("API error")
+
+            result = runner.invoke(
+                main,
+                ["feedback", "--project-dir", str(project)],
+            )
+
+        assert result.exit_code != 0
+        assert "API error" in result.output
+
+    def test_feedback_handles_review_error_json(self, runner, project):
+        from unittest.mock import patch
+
+        (project / ".floop" / "floop.env").write_text(
+            "FLOOP_SERVER_URL=https://server.example\n"
+            "FLOOP_PROJECT_KEY=proj_1\n"
+            "FLOOP_API_KEY=flp_secret\n",
+            encoding="utf-8",
+        )
+
+        with patch("floop.review.list_review_versions") as mock_list:
+            from floop.review import ReviewError
+            mock_list.side_effect = ReviewError("API error")
+
+            result = runner.invoke(
+                main,
+                ["feedback", "--project-dir", str(project), "--json-output"],
+            )
+
+        assert result.exit_code != 0
+        payload = json.loads(result.output)
+        assert payload["error"] == "FEEDBACK_FAILED"
+        assert "API error" in payload["message"]
+
+    def test_feedback_no_comments_yet(self, runner, project):
+        from unittest.mock import patch
+
+        (project / ".floop" / "floop.env").write_text(
+            "FLOOP_SERVER_URL=https://server.example\n"
+            "FLOOP_PROJECT_KEY=proj_1\n"
+            "FLOOP_API_KEY=flp_secret\n",
+            encoding="utf-8",
+        )
+
+        versions_data = [
+            {
+                "versionId": "ver_1",
+                "versionLabel": "v1.0",
+                "status": "ready",
+                "uploadedAt": "2026-05-08T00:00:00Z",
+            }
+        ]
+
+        with patch("floop.review.list_review_versions") as mock_list:
+            with patch("floop.review.get_review_comments") as mock_comments:
+                mock_list.return_value = versions_data
+                mock_comments.return_value = []
+
+                result = runner.invoke(main, ["feedback", "--project-dir", str(project)])
+
+        assert result.exit_code == 0
+        assert "No comments yet for version 'v1.0'" in result.output
+        assert "Share the review link with reviewers" in result.output

@@ -42,6 +42,35 @@ floop version create <name>   # Snapshot build/ → .floop/versions/<name>/
 floop version list            # List all saved versions
 ```
 
+### Review
+
+```bash
+floop review set                                  # Step 1: configure server/API key/project key
+floop review --version <name>                         # Upload a saved version to floop-server
+floop review --server-url <url> --project-key <key>   # Configure SaaS/self-host target
+floop review --project-key <key> --api-key flp_...    # CLI values are saved to .floop/floop.env
+```
+
+Use review in two steps:
+
+1. `floop review set` creates or updates `.floop/floop.env`, validates the API key by listing projects, and writes `FLOOP_PROJECT_KEY` by selecting or creating a project.
+2. `floop review --version <name>` checks the saved version/build and uploads it.
+
+`floop review` reads `.floop/floop.env` first. If required values are missing, it creates or updates this template and asks you to run `floop review set`:
+
+```env
+FLOOP_SERVER_URL=https://floop-server.vercel.app
+FLOOP_PROJECT_KEY=proj_...
+FLOOP_API_KEY=flp_...
+```
+
+Missing setup exits successfully with `status: setup_required` in JSON mode so Agents can read the next action. Treat it as incomplete setup, not a successful upload; a real upload result includes `shareUrl`.
+
+The file is added to `.floop/.gitignore` because it stores the API key.
+
+`floop preview` renders its navigation shell at runtime and does not write
+`.floop/build/index.html`, so `floop review` uploads only real build artifacts.
+
 ### Preview
 
 ```bash

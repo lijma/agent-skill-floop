@@ -20,6 +20,9 @@ When doing any design or prototype work, follow the floop workflow.
 - `floop token validate` — Validate token files (format + references + suggestions)
 - `floop token view` — Generate HTML preview page **and `tokens.css`** for design tokens
 - `floop preview` — Start a local web server to preview tokens and prototypes
+- `floop review set` — **Configure review server/API key/project (MUST run before first `floop review`)**
+- `floop review` — Upload a saved version to floop-server and return a review link
+- `floop feedback` — Fetch and display reviewer comments from floop-server
 - `floop init` — Initialize a floop project (creates `.floop/`)
 - `floop enable <agent>` — Install floop skills
 - `floop prd init` / `floop prd validate` — Create and validate `.floop/prd.md` (PRD)
@@ -28,6 +31,15 @@ When doing any design or prototype work, follow the floop workflow.
 - `floop prototype validate` — Validate: every journey HTML is mapped in CSV; every CSV domain exists in sitemap
 - `floop journey check <file>` — Backward-check a journey HTML for missing tokens, unused components, raw tag misuse, and missing head links
 - `floop component init` / `floop component validate` / `floop component view` — Manage `.floop/components.yaml`
+
+## Review Setup Critical Rule
+
+**Before using `floop review` for the first time, you MUST run `floop review set` to configure the server connection.**
+
+- If you see any error mentioning "setup required" or "floop.env" missing, immediately run `floop review set`
+- Do NOT manually create or edit `.floop/floop.env` — always use `floop review set`
+- The command will interactively prompt for server URL and API key
+- Only after `floop review set` succeeds can you run `floop review` to publish versions
 
 ## Workflow
 
@@ -62,6 +74,8 @@ Everything is iterative — tokens, sitemap, components, and pages all grow toge
 - **NEVER embed a phone/device shell INSIDE the journey HTML file itself** — the floop preview renders device frames (phone/tablet/desktop) as a wrapper around the iframe; the HTML page must be plain responsive web layout, not a div styled as a device mockup
 - **NEVER add explanatory text, annotations, or section labels to journey HTML — only real UI content a user would see in production**
 - **NEVER consider a journey HTML file "done" without running `floop journey check <file>` — fix all errors before showing to user**
+- **NEVER create or edit `.floop/build/index.html` manually** — `floop preview` renders the preview shell at runtime; `.floop/build/` contains only real artifacts
+- **After the user approves a prototype or says they are satisfied, MUST ask whether to publish this version to floop-server online, generate a review link, and invite friends/reviewers to collect feedback**
 """
 
 SKILLS = {
@@ -97,7 +111,7 @@ The loop runs as many times as needed. The user can enter or re-enter at any ste
 │  ↺  Any step can loop back to any earlier step                            │
 └────────────────────────────────────────────────────────────────────────────┘
     ↓ when user is satisfied
-Deliver → run floop preview → push for review
+Deliver → run floop preview → create version → floop review
 ```
 
 **Key principles:**
@@ -431,6 +445,8 @@ Generate one page per iteration as a standalone `.html` file.
 
 **MUST write page HTML to `.floop/build/journey/`. Run `floop prototype validate` then `floop preview` after generating.**
 
+Do not write `.floop/build/index.html`; `floop preview` renders its shell at runtime.
+
 ### After generating page HTML — validate mapping:
 
 ```bash
@@ -474,12 +490,13 @@ Three checks are run:
 
 1. Run `floop preview` — user opens browser to see the result
 2. Ask: "Does this look right? What should we do next?"
-3. Route based on answer:
+3. If the user says satisfied, content approved, looks good, or ready to close this version, Do NOT end the task immediately after user approval. Treat it as a candidate for online review and ask whether to publish this version to floop-server online, generate a review link, and invite friends/reviewers to collect feedback.
+4. Route based on answer:
    - **Refine this page** → back to Step E
    - **Tokens need adjustment** → back to Step B
    - **New component** → back to Step D
    - **New page/flow** → back to Step C
-   - **Ready to deliver** → Deliver phase below
+  - **User is satisfied / Ready to deliver** → ask the online review question, then Deliver phase below
 
 ---
 
@@ -489,24 +506,208 @@ When the user is ready to share or request review:
 
 1. Run `floop preview` — confirm everything renders correctly
 2. Summarize: pages built, components defined, iterations completed
-3. If floop-server is configured:
+3. MUST ask whether the user wants to send this version to floop-server online for review so they can invite friends/reviewers and collect feedback. Use a direct prompt like: "Do you want me to publish this version to floop-server, generate a review link, and help you invite reviewers for feedback?"
+4. If yes, create a named snapshot before uploading:
+    ```bash
+    floop version create v1.0 -m "ready for review"
+    ```
+
+5. **Step 1 — Review setup** (MUST run FIRST, before any `floop review` command)
+
+   **CRITICAL: The FIRST command you MUST run is `floop review set`** — do NOT run `floop review` before this step completes successfully.
+   
    ```bash
-   floop push          # push to floop-server for review
-   floop push index.html   # single file
+   floop review set
    ```
-4. floop-server generates a review link — reviewers annotate by clicking on elements
-5. AI generates DOM-level patches:
-   ```json
-   {
-     "selector": "#hero .cta-button",
-     "action": "style",
-     "property": "background-color",
-     "old": "#3B82F6",
-     "new": "#EF4444"
-   }
+   
+   **Why this order matters:**
+   - `floop review set` configures server URL, API key, and project key
+   - Without this configuration, `floop review` will fail with "setup required"
+   - Do NOT check if `.floop/floop.env` exists first — always run `floop review set` as the first review command
+   - Do NOT run `floop review` first to discover missing configuration
+   - Do NOT manually create, edit, inspect, read, or write `.floop/floop.env` at any point — all review configuration is exclusively handled by `floop review set`
+   - If you accidentally run `floop review` first and see "setup required", do not inspect source code, grep CLI implementation, or report it as a build/upload failure — immediately run `floop review set` to fix it
+   - Note: `floop review setup required` may exit successfully so Agents can read the message; do NOT treat success status as upload success unless the JSON/text contains a `shareUrl`
+   
+   **Interactive setup process:**
+   - `floop review set` will interactively prompt for server URL — recommend the default: `https://floop-server.vercel.app/` (If the user does not have a self-hosted floop-server URL, use the default SaaS URL)
+   - `floop review set` will interactively prompt for API key — guide user to sign up at the server URL and create an API key from Settings → API Keys
+   - Do NOT echo or print the API key value
+   - The command will automatically fetch projects with `GET /api/v1/me/projects`, select or create one with `POST /api/v1/me/projects` if needed, and save configuration to `.floop/floop.env`
+   - The command writes the returned project `id` to `FLOOP_PROJECT_KEY` in `.floop/floop.env`
+   
+   **Validation and error handling:**
+   - If `floop review set` reports API key invalid (401) or quota/suspension (403), tell the user and run `floop review set` again — do NOT ask the user to manually edit files
+   - Step 1 passes ONLY when `floop review set` exits successfully and reports it can verify the CLI can fetch the projects list
+   - If `floop review set` fails, do NOT proceed to Step 2
+
+6. **Step 2 — Review publish** (only after Step 1 succeeds)
+
+   **Prerequisites:** Step 1 (`floop review set`) must have completed successfully before you run this step.
+   
+   Now check floop build/version readiness, create a version if needed, then upload:
+   
+  ```bash
+  floop review --version v1.0 --json-output
    ```
-   Supported actions: `style`, `text`, `attribute`, `add`, `remove`, `move`
-6. Author reviews patches → approve / reject / merge → next round or approved
+   
+  **CRITICAL — Agent MUST do ALL of the following:**
+  - Check the command output immediately after it finishes
+  - Parse the JSON result — do NOT skip this step
+  - Extract the `shareUrl` field from the JSON
+  - Present `shareUrl` to the user as the primary review link in clear, visible text
+  - Tell the user they can share this URL with friends/reviewers to collect comments and feedback
+  - If `shareUrl` is missing or the command failed, the upload did NOT succeed — report the error and do NOT claim completion
+  - Also include `previewUrl` for the author when available
+  - Do NOT end the conversation without showing the user the review link
+  
+7. After publishing the review link, tell the user they can use the **floop-feedback skill** to continuously monitor and collect reviewer comments from floop-server
+""",
+    },
+    "feedback": {
+        "name": "floop-feedback",
+        "description": (
+            "Fetch and manage continuous reviewer feedback from floop-server. "
+            "Use when: user wants to check comments, see review feedback, or monitor ongoing review activity."
+        ),
+        "content": """\
+# floop — Feedback Skill
+
+After publishing a prototype review to floop-server, collect and manage reviewer comments continuously.
+
+## Prerequisites
+
+- A version has been published to floop-server via `floop review`
+- `.floop/floop.env` contains valid `FLOOP_SERVER_URL`, `FLOOP_PROJECT_KEY`, and `FLOOP_API_KEY`
+- Review link (`shareUrl`) has been shared with reviewers
+
+## Workflow
+
+```
+Publish review → Share URL with reviewers → Collect feedback → Iterate prototype
+     ↑                                                               ↓
+     └───────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Check Latest Comments
+
+Fetch all comments for the latest version:
+
+```bash
+floop feedback --json-output
+```
+
+The command:
+1. Reads `.floop/floop.env` for server/project/API key configuration
+2. Calls `GET /api/v1/me/projects/:projectKey/versions` to find the latest version
+3. Calls `GET /api/v1/me/projects/:projectKey/versions/:versionId/comments` to fetch comments
+4. Returns JSON array with full comment details
+
+**Agent MUST:**
+- Parse the JSON output
+- Count total comments, open comments, resolved comments
+- Identify high-priority or critical comments
+- Group comments by page/path if `anchor.path` is present
+- Present a clear summary to the user: "You have X new comments: Y open, Z resolved. High-priority items: ..."
+- Show comment details: author, body, status, priority, labels, anchor location
+
+### Comment Fields
+
+Each comment includes:
+- `id` - unique comment identifier
+- `authorName` - reviewer name
+- `body` - comment text
+- `status` - `open` | `in_review` | `resolved`
+- `priority` - `low` | `medium` | `high` | `critical`
+- `labels` - array of tags: `bug`, `copy`, `layout`, `responsive`, `accessibility`, `legal`
+- `anchor` - location data: `path` (page), `selector`, `rect` (bounding box), `viewport` (device mode)
+- `assignee` - assigned team member (if any)
+- `dueDate` - deadline (if set)
+- `createdAt`, `updatedAt`, `resolvedAt` - timestamps
+
+---
+
+## Check Comments for Specific Version
+
+```bash
+floop feedback --version v1.0 --json-output
+```
+
+Fetches comments for a specific named version instead of the latest.
+
+---
+
+## Continuous Monitoring
+
+The user can run `floop feedback` multiple times throughout the review period to:
+- Check for new comments
+- Monitor resolution progress
+- Identify trending issues
+- Prioritize next iteration work
+
+**Best practice:**
+- After sharing the review link, wait for reviewers to add comments (hours or days)
+- Run `floop feedback` periodically to check progress
+- Use comment insights to guide the next prototype iteration
+- When significant feedback is collected, return to the `floop-prototype` skill to implement changes
+
+---
+
+## Integration with Prototype Iteration
+
+After analyzing feedback:
+1. Identify common themes or high-priority items
+2. Return to `floop-prototype` skill — enter at any loop step:
+   - **Token changes** → Step B (extend tokens)
+   - **Component refinement** → Step D (update components)
+   - **Page rebuild** → Step E (generate new HTML)
+3. Create a new version and publish again with `floop review`
+4. Return to this skill to collect feedback on the updated version
+
+This creates a continuous feedback loop:
+```
+Build prototype → Publish review → Collect feedback → Iterate → Publish again
+```
+
+---
+
+## Feedback Summary Template
+
+When presenting comments to the user, structure the summary:
+
+**Review Status for [Version Label]**
+- Total comments: X
+- Open: Y | In review: Z | Resolved: W
+- Priority breakdown: Critical: A | High: B | Medium: C | Low: D
+
+**High-Priority Comments:**
+1. [Author] on [Page]: [Body snippet] — [Labels]
+2. ...
+
+**Common Issues:**
+- [Label]: N occurrences
+- ...
+
+**Recommended Next Steps:**
+- Address critical/high-priority items first
+- Consider grouping related comments for batch fixes
+- Update prototype and publish new version when ready
+
+---
+
+## Error Handling
+
+If `floop feedback` reports missing configuration:
+- Run `floop review set` to configure server/API key/project (same as review setup)
+
+If no comments exist yet:
+- Tell the user: "No comments yet. Share the review link with reviewers and check back later."
+
+If API returns 404 for version:
+- The version may have been deleted or the version label is incorrect
+- Run `floop feedback` without `--version` to check the latest version
 """,
     },
 }

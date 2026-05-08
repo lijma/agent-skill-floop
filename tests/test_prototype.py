@@ -1087,6 +1087,33 @@ class TestVersionCreate:
         assert (ver / "home.html").exists()
         assert (ver / "meta.json").exists()
 
+    def test_preview_render_does_not_add_index_to_snapshot(self, tmp_path):
+        from floop.preview import render_preview_index
+        from floop.prototype import version_create
+
+        floop_dir = tmp_path / ".floop"
+        build_dir = floop_dir / "build"
+        build_dir.mkdir(parents=True)
+        (build_dir / "home.html").write_text("<html></html>", encoding="utf-8")
+        render_preview_index(build_dir)
+
+        ver = version_create(tmp_path, "v1.0")
+        assert (ver / "home.html").exists()
+        assert not (ver / "index.html").exists()
+
+    def test_excludes_root_index_from_snapshot(self, tmp_path):
+        from floop.prototype import version_create
+
+        floop_dir = tmp_path / ".floop"
+        build_dir = floop_dir / "build"
+        build_dir.mkdir(parents=True)
+        (build_dir / "index.html").write_text("<html>App</html>", encoding="utf-8")
+        (build_dir / "home.html").write_text("<html></html>", encoding="utf-8")
+
+        ver = version_create(tmp_path, "v1.0")
+        assert not (ver / "index.html").exists()
+        assert (ver / "home.html").exists()
+
     def test_meta_json_contains_version_and_message(self, tmp_path):
         import json
         from floop.prototype import version_create

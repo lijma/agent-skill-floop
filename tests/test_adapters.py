@@ -29,6 +29,84 @@ class TestAdapterRegistry:
         assert set(ADAPTERS.keys()) == set(SUPPORTED_AGENTS)
 
 
+class TestSkillContent:
+    def test_skills_registry_has_prototype_and_feedback(self):
+        assert "prototype" in SKILLS
+        assert "feedback" in SKILLS
+        assert SKILLS["prototype"]["name"] == "floop-prototype"
+        assert SKILLS["feedback"]["name"] == "floop-feedback"
+
+    def test_feedback_skill_mentions_commands(self):
+        feedback_content = SKILLS["feedback"]["content"]
+        assert "floop feedback" in feedback_content
+        assert "floop feedback --json-output" in feedback_content
+        assert "floop feedback --version v1.0 --json-output" in feedback_content
+        assert "GET /api/v1/me/projects/:projectKey/versions" in feedback_content
+        assert "GET /api/v1/me/projects/:projectKey/versions/:versionId/comments" in feedback_content
+
+    def test_feedback_skill_describes_comment_fields(self):
+        feedback_content = SKILLS["feedback"]["content"]
+        assert "authorName" in feedback_content
+        assert "status" in feedback_content
+        assert "priority" in feedback_content
+        assert "labels" in feedback_content
+        assert "anchor" in feedback_content
+        assert "`open`" in feedback_content or "open |" in feedback_content
+        assert "`resolved`" in feedback_content or "resolved" in feedback_content
+        assert "`critical`" in feedback_content or "critical" in feedback_content
+
+    def test_prototype_skill_mentions_feedback_skill(self):
+        prototype_content = SKILLS["prototype"]["content"]
+        assert "floop-feedback skill" in prototype_content
+
+    def test_review_guidance_recommends_default_saas_url(self):
+        content = "\n".join(skill["content"] for skill in SKILLS.values())
+        assert "https://floop-server.vercel.app/" in content
+        assert "If the user does not have a self-hosted floop-server URL" in content
+
+    def test_review_guidance_prompts_after_user_satisfaction(self):
+        content = "\n".join(skill["content"] for skill in SKILLS.values())
+        assert "If the user says satisfied, content approved, looks good" in content
+        assert "Do NOT end the task immediately after user approval" in content
+        assert "invite friends/reviewers to collect feedback" in content
+
+    def test_review_guidance_uses_floop_env(self):
+        content = "\n".join(skill["content"] for skill in SKILLS.values())
+        assert ".floop/floop.env" in content
+        assert "Step 1 — Review setup" in content
+        assert "Do NOT check if `.floop/floop.env` exists first" in content
+        assert "Do NOT run `floop review` first to discover missing configuration" in content
+        assert "do not inspect source code, grep CLI implementation" in content
+        assert "may exit successfully so Agents can read the message" in content
+        assert "unless the JSON/text contains a `shareUrl`" in content
+        assert "Do NOT manually create, edit, inspect, read, or write `.floop/floop.env`" in content
+        assert "all review configuration is exclusively handled by `floop review set`" in content
+        assert "`floop review set` will interactively prompt for server URL" in content
+        assert "`floop review set` will interactively prompt for API key" in content
+        assert "run `floop review set` again — do NOT ask the user to manually edit files" in content
+        assert "Step 1 passes ONLY when `floop review set` exits successfully" in content
+        assert "If `floop review set` fails, do NOT proceed to Step 2" in content
+
+    def test_review_guidance_uses_server_project_api(self):
+        content = "\n".join(skill["content"] for skill in SKILLS.values())
+        assert "floop review set" in content
+        assert "GET /api/v1/me/projects" in content
+        assert "POST /api/v1/me/projects" in content
+        assert "writes the returned project `id` to `FLOOP_PROJECT_KEY`" in content
+        assert "verify the CLI can fetch the projects list" in content
+        assert "Step 2 — Review publish" in content
+        assert "floop review --version v1.0 --json-output" in content
+        assert "CRITICAL — Agent MUST do ALL of the following" in content
+        assert "Check the command output immediately after it finishes" in content
+        assert "Parse the JSON result — do NOT skip this step" in content
+        assert "Extract the `shareUrl` field from the JSON" in content
+        assert "Present `shareUrl` to the user as the primary review link in clear, visible text" in content
+        assert "share this URL with friends/reviewers to collect comments and feedback" in content
+        assert "Do NOT end the conversation without showing the user the review link" in content
+        assert "If `shareUrl` is missing or the command failed, the upload did NOT succeed" in content
+        assert "Do NOT echo or print the API key" in content
+
+
 class TestCopilotAdapter:
     def test_install_creates_skill_dirs(self, tmp_path):
         adapter = CopilotAdapter()

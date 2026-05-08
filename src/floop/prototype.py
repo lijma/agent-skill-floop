@@ -592,7 +592,12 @@ def version_create(project_dir: Path, name: str, message: str = "") -> Path:
     if version_dir.exists():
         raise ValueError(f"Version '{name}' already exists.")
 
-    shutil.copytree(str(build_dir), str(version_dir))
+    def ignore_root_index(directory: str, names: list[str]) -> set[str]:
+        if Path(directory).resolve() == build_dir.resolve() and "index.html" in names:
+            return {"index.html"}
+        return set()
+
+    shutil.copytree(str(build_dir), str(version_dir), ignore=ignore_root_index)
 
     meta = {
         "version": name,

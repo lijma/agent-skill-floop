@@ -1,8 +1,8 @@
-"""floop preview — index page generator for the local preview server.
+"""floop preview — runtime shell renderer for the local preview server.
 
-Generates a Figma-style navigation shell (index.html) in .floop/build/
-that lists all HTML artefacts in a sidebar, grouped by category, and
-renders the selected file in a full-height iframe.
+Renders a local-only Figma-style navigation shell at request time. The shell
+lists HTML artifacts in a sidebar, grouped by category, and renders the
+selected file in a full-height iframe without writing index.html into build/.
 """
 
 from __future__ import annotations
@@ -47,6 +47,7 @@ _INDEX_TEMPLATE = """\
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<base href="/build/">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>floop preview</title>
 <style>
@@ -599,8 +600,8 @@ document.addEventListener('DOMContentLoaded', function() {
 # ---------------------------------------------------------------------------
 
 
-def generate_preview_index(build_dir: Path, active_version: str = "trunk") -> Path:
-    """Generate an index.html navigation shell in *build_dir*.
+def render_preview_index(build_dir: Path, active_version: str = "trunk") -> str:
+    """Render the local preview shell HTML for *build_dir*.
 
     If .floop/journey-map.csv is present, builds a Sitemap section at the top
     of the sidebar showing sitemap domains (with device toolbar + page dropdown
@@ -609,7 +610,7 @@ def generate_preview_index(build_dir: Path, active_version: str = "trunk") -> Pa
 
     *active_version* sets the initially selected version in the dropdown.
 
-    Returns the path to the generated index.html.
+    The shell is returned as a string and is not written into .floop/build/.
     """
     domains = _load_journey_domains(build_dir)
 
@@ -671,9 +672,38 @@ def generate_preview_index(build_dir: Path, active_version: str = "trunk") -> Pa
         .replace("// ACTIVE_VERSION", active_version_script)
     )
 
-    out = build_dir / "index.html"
-    out.write_text(content, encoding="utf-8")
-    return out
+    return content
+
+
+def create_preview_request_handler(
+    floop_dir: Path,
+    build_dir: Path,
+    active_version: str = "trunk",
+) -> type:
+    """Create an HTTP handler that serves a virtual preview index."""
+    import http.server
+    import urllib.parse
+
+    class PreviewRequestHandler(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, directory=str(floop_dir), **kwargs)
+
+        def do_GET(self):
+            request_path = urllib.parse.urlparse(self.path).path
+            if request_path in {"/", "/index.html", "/build", "/build/", "/build/index.html"}:
+                self._send_preview_index()
+                return
+            super().do_GET()
+
+        def _send_preview_index(self):
+            content = render_preview_index(build_dir, active_version=active_version).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(content)))
+            self.end_headers()
+            self.wfile.write(content)
+
+    return PreviewRequestHandler
 
 
 # ---------------------------------------------------------------------------
@@ -834,7 +864,7 @@ def _build_sitemap_nav_html(
 def _categorize_files(build_dir: Path) -> dict[str, list]:
     """Categorise *.html files in *build_dir* (recursively) into labelled sections.
 
-    Root index.html (the preview shell) is excluded.
+    Root index.html is reserved for the virtual preview shell and is excluded.
     Subdirectories with an index.html become a folder group: a tuple of
     ``(index_path, [child_paths])``, placed before any root-level files in
     their category.  Subdirectories without an index.html are listed flat.

@@ -1,6 +1,7 @@
 """floop CLI entry point."""
 
 import json
+import os
 from pathlib import Path
 
 import click
@@ -29,6 +30,7 @@ def main():
       floop enable qwen-code  Install skills (Qwen Code)
       floop enable opencode   Install skills (OpenCode)
       floop enable openclaw   Install skills (OpenClaw)
+      floop review            Upload a saved version to floop-server
     """
 
 
@@ -74,7 +76,8 @@ def init(project_dir: Path):
     gitignore_path = floop_dir / ".gitignore"
     gitignore_path.write_text(
         "# Generated artifacts — track via floop-server, not git\n"
-        "build/\n",
+        "build/\n"
+        "/floop.env\n",
         encoding="utf-8",
     )
 
@@ -322,8 +325,8 @@ def token_view_cmd(project_dir: Path):
 def preview(project_dir: Path, port: int, active_version: str):
     """Start a local web server to preview floop output.
 
-    Generates a navigation index page in .floop/build/ and serves it on
-    a temporary local port.  Open the printed URL in your browser to
+    Renders a navigation index page at request time and serves it on
+    a temporary local port. Open the printed URL in your browser to
     browse design tokens, components, and prototype pages.
 
     Use --version to start preview pinned to a named snapshot.
@@ -331,10 +334,9 @@ def preview(project_dir: Path, port: int, active_version: str):
     Press Ctrl+C to stop the server.
     """
     import http.server
-    import functools
     import socket
 
-    from floop.preview import generate_preview_index
+    from floop.preview import create_preview_request_handler
 
     project_dir = project_dir.resolve()
     floop_dir = project_dir / ".floop"
@@ -348,12 +350,12 @@ def preview(project_dir: Path, port: int, active_version: str):
     build_dir = floop_dir / "build"
     build_dir.mkdir(parents=True, exist_ok=True)
 
-    # Generate (or refresh) the navigation index page
-    generate_preview_index(build_dir, active_version=active_version)
-
-    # Serve from .floop/ so both build/ and versions/ are reachable
-    handler = functools.partial(
-        http.server.SimpleHTTPRequestHandler, directory=str(floop_dir)
+    # Serve from .floop/ so both build/ and versions/ are reachable.
+    # The preview index is virtual and is not written into .floop/build/.
+    handler = create_preview_request_handler(
+        floop_dir,
+        build_dir,
+        active_version=active_version,
     )
 
     # Find a free port if port=0
@@ -364,7 +366,7 @@ def preview(project_dir: Path, port: int, active_version: str):
     server = http.server.HTTPServer(("127.0.0.1", chosen_port), handler)
 
     click.secho("floop preview server", fg="green", bold=True)
-    click.echo(f"  http://127.0.0.1:{chosen_port}/build/")
+    click.echo(f"  http://127.0.0.1:{chosen_port}/")
     click.echo("\n  Press Ctrl+C to stop.\n")
 
     try:
@@ -736,6 +738,514 @@ def version_list_cmd(project_dir: Path):
         msg = v.get("message", "")
         suffix = f"  {msg}" if msg else ""
         click.echo(f"  {v['version']}  ({date}){suffix}")
+
+
+# ---------------------------------------------------------------------------
+# floop review — Upload saved versions to floop-server
+# ---------------------------------------------------------------------------
+
+
+@main.group(invoke_without_command=True)
+@click.pass_context
+@click.option(
+    "--project-dir",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=".",
+    help="Project root directory (default: current directory).",
+)
+@click.option(
+    "--server-url",
+    default=None,
+    help="floop-server base URL (default: configured value or public SaaS).",
+)
+@click.option(
+    "--project-key",
+    default=None,
+    help="floop-server project key (default: .floop/floop.env or configured value).",
+)
+@click.option(
+    "--api-key",
+    default=None,
+    help="floop API key (default: .floop/floop.env, then FLOOP_API_KEY).",
+)
+@click.option(
+    "--version",
+    "upload_version",
+    default=None,
+    help="Version snapshot to upload (default: latest saved version; use trunk explicitly for current build).",
+)
+@click.option(
+    "--json-output",
+    "output_json",
+    is_flag=True,
+    default=False,
+    help="Output structured JSON for Agent consumption.",
+)
+@click.option(
+    "--timeout",
+    type=int,
+    default=60,
+    help="HTTP upload timeout in seconds.",
+)
+def review(
+    ctx: click.Context,
+    project_dir: Path,
+    server_url: str | None,
+    project_key: str | None,
+    api_key: str | None,
+    upload_version: str | None,
+    output_json: bool,
+    timeout: int,
+):
+    """Upload a saved prototype version to floop-server for review.
+
+    The command reads .floop/floop.env and uploads review artifacts. If required
+    settings are missing, it creates a template and asks you to run
+    'floop review set' before uploading.
+    """
+    if ctx.invoked_subcommand is not None:
+        return
+
+    from floop.review import (
+        DEFAULT_SERVER_URL,
+        ReviewError,
+        create_review_archive,
+        get_review_env,
+        normalize_server_url,
+        resolve_review_source,
+        save_review_env,
+        upload_review,
+        write_review_env_template,
+    )
+
+    project_dir = project_dir.resolve()
+    try:
+        if not (project_dir / ".floop").exists():
+            raise ReviewError(".floop/ not found. Run 'floop init' first.")
+
+        env_server, env_project, env_api_key = get_review_env(project_dir)
+        resolved_server = server_url or env_server or DEFAULT_SERVER_URL
+        resolved_project = project_key or env_project
+
+        resolved_server = normalize_server_url(resolved_server)
+        api_key = api_key or env_api_key or os.environ.get("FLOOP_API_KEY")
+
+        if not resolved_project or not api_key:
+            env_path = write_review_env_template(
+                project_dir,
+                server_url=resolved_server,
+                project_key=resolved_project,
+                api_key=api_key,
+            )
+            rel_env_path = env_path.relative_to(project_dir)
+            missing = []
+            if not api_key:
+                missing.append("FLOOP_API_KEY")
+            if not resolved_project:
+                missing.append("FLOOP_PROJECT_KEY")
+            setup_payload = {
+                "status": "setup_required",
+                "uploaded": False,
+                "serverUrl": resolved_server,
+                "envPath": str(rel_env_path),
+                "missing": missing,
+                "nextCommand": "floop review set",
+                "message": "Review setup is required before upload.",
+            }
+            if output_json:
+                click.echo(json.dumps(setup_payload, indent=2, ensure_ascii=False))
+                return
+            click.secho("⚠ floop review setup required", fg="yellow")
+            click.echo(f"Created or updated {rel_env_path} with review settings template.")
+            click.echo(f"Missing: {', '.join(missing)}.")
+            click.echo("NEXT: run 'floop review set' now.")
+            click.echo(
+                "This is setup, not a build/upload failure; do not inspect source or retry 'floop review' before setup passes."
+            )
+            return
+
+        resolved_project = resolved_project.strip()
+
+        save_review_env(project_dir, resolved_server, resolved_project, api_key)
+        source_dir, version_label = resolve_review_source(project_dir, upload_version)
+        archive_bytes = create_review_archive(source_dir)
+        result = upload_review(
+            server_url=resolved_server,
+            project_key=resolved_project,
+            api_key=api_key,
+            archive_bytes=archive_bytes,
+            version_label=version_label,
+            timeout=timeout,
+        )
+    except ReviewError as exc:
+        click.secho(f"⚠ {exc}", fg="yellow", err=True)
+        raise SystemExit(1)
+
+    payload = {
+        "serverUrl": resolved_server,
+        "projectKey": result.get("projectKey") or result.get("projectId") or resolved_project,
+        "versionId": result.get("versionId"),
+        "versionLabel": version_label,
+        "previewUrl": result.get("previewUrl"),
+        "shareUrl": result.get("shareUrl"),
+        "status": result.get("status"),
+    }
+
+    if output_json:
+        click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
+        return
+
+    click.secho("✓ Review version uploaded", fg="green", bold=True)
+    click.echo(f"  version: {version_label}")
+    click.echo(f"  preview: {payload['previewUrl']}")
+    click.echo(f"  share: {payload['shareUrl']}")
+
+
+@review.command("set")
+@click.option(
+    "--project-dir",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=".",
+    help="Project root directory (default: current directory).",
+)
+@click.option(
+    "--server-url",
+    default=None,
+    help="floop-server base URL (default: existing value or public SaaS).",
+)
+@click.option(
+    "--api-key",
+    default=None,
+    help="floop API key (default: existing value, FLOOP_API_KEY, or secure prompt).",
+)
+@click.option(
+    "--project-key",
+    default=None,
+    help="Use an existing floop-server project key.",
+)
+@click.option(
+    "--project-name",
+    default=None,
+    help="Project name to create when no project exists.",
+)
+@click.option(
+    "--project-slug",
+    default=None,
+    help="Optional slug when creating a project.",
+)
+@click.option(
+    "--json-output",
+    "output_json",
+    is_flag=True,
+    default=False,
+    help="Output structured JSON for Agent consumption.",
+)
+@click.option(
+    "--timeout",
+    type=int,
+    default=60,
+    help="HTTP timeout in seconds.",
+)
+def review_set(
+    project_dir: Path,
+    server_url: str | None,
+    api_key: str | None,
+    project_key: str | None,
+    project_name: str | None,
+    project_slug: str | None,
+    output_json: bool,
+    timeout: int,
+):
+    """Configure .floop/floop.env and verify floop-server access."""
+    from floop.review import (
+        DEFAULT_SERVER_URL,
+        ReviewError,
+        create_review_project,
+        get_review_env,
+        list_review_projects,
+        normalize_server_url,
+        save_review_env,
+        write_review_env_template,
+    )
+
+    project_dir = project_dir.resolve()
+    try:
+        if not (project_dir / ".floop").exists():
+            raise ReviewError(".floop/ not found. Run 'floop init' first.")
+
+        env_server, env_project, env_api_key = get_review_env(project_dir)
+        resolved_server = normalize_server_url(server_url or env_server or DEFAULT_SERVER_URL)
+        resolved_api_key = api_key or env_api_key or os.environ.get("FLOOP_API_KEY")
+
+        if not resolved_api_key:
+            write_review_env_template(project_dir, server_url=resolved_server)
+            resolved_api_key = click.prompt("floop API key", hide_input=True)
+
+        projects = list_review_projects(
+            server_url=resolved_server,
+            api_key=resolved_api_key,
+            timeout=timeout,
+        )
+        active_projects = [p for p in projects if p.get("status") != "suspended"]
+        resolved_project = project_key or env_project
+
+        if resolved_project:
+            matching = [p for p in projects if p.get("id") == resolved_project]
+            if not matching:
+                raise ReviewError("Project key not found for this API key.")
+            selected_project = matching[0]
+        elif len(active_projects) == 1:
+            selected_project = active_projects[0]
+            resolved_project = str(selected_project["id"])
+        elif not active_projects:
+            created_name = project_name or project_dir.name or "Floop Project"
+            selected_project = create_review_project(
+                server_url=resolved_server,
+                api_key=resolved_api_key,
+                name=created_name,
+                slug=project_slug,
+                timeout=timeout,
+            )
+            resolved_project = str(selected_project["id"])
+        else:
+            click.echo("Multiple floop projects found:")
+            for index, project in enumerate(active_projects, start=1):
+                name = project.get("name") or "Untitled"
+                project_key = project.get("id") or "no-key"
+                click.echo(f"  {index}. {name} ({project_key})")
+            choice = click.prompt("Choose project", type=click.IntRange(1, len(active_projects)))
+            selected_project = active_projects[choice - 1]
+            resolved_project = str(selected_project["id"])
+
+        env_path = save_review_env(
+            project_dir,
+            resolved_server,
+            resolved_project,
+            resolved_api_key,
+        )
+    except ReviewError as exc:
+        click.secho(f"⚠ {exc}", fg="yellow", err=True)
+        raise SystemExit(1)
+
+    payload = {
+        "serverUrl": resolved_server,
+        "projectKey": resolved_project,
+        "projectName": selected_project.get("name"),
+        "projectSlug": selected_project.get("slug"),
+        "envPath": str(env_path.relative_to(project_dir)),
+        "projectCount": len(projects),
+    }
+
+    if output_json:
+        click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
+        return
+
+    click.secho("✓ floop review settings saved", fg="green", bold=True)
+    click.echo(f"  server: {payload['serverUrl']}")
+    click.echo(f"  project: {payload['projectName'] or payload['projectKey']}")
+    click.echo(f"  env: {payload['envPath']}")
+    click.echo("  next: floop review --json-output")
+
+
+# ---------------------------------------------------------------------------
+# floop feedback — Fetch reviewer comments from floop-server
+# ---------------------------------------------------------------------------
+
+
+@main.command()
+@click.option(
+    "--version",
+    default=None,
+    help="Version label to fetch comments for (default: latest version).",
+)
+@click.option(
+    "--project-dir",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=None,
+    help="floop project directory (default: current directory).",
+)
+@click.option(
+    "--json-output",
+    is_flag=True,
+    default=False,
+    help="Print structured JSON instead of human-readable text.",
+)
+def feedback(
+    version: str | None,
+    project_dir: Path | None,
+    json_output: bool,
+):
+    """Fetch and display reviewer comments from floop-server.
+
+    Retrieves comments for the latest version, or for a specific version if --version is provided.
+    Requires .floop/floop.env with FLOOP_SERVER_URL, FLOOP_PROJECT_KEY, and FLOOP_API_KEY.
+
+    \b
+    Examples:
+      floop feedback
+      floop feedback --version v1.0
+      floop feedback --json-output
+    """
+    from floop.review import (
+        ReviewError,
+        get_review_comments,
+        get_review_env,
+        list_review_versions,
+    )
+
+    project = project_dir or Path.cwd()
+    if not (project / ".floop").is_dir():
+        raise click.ClickException(
+            f".floop/ directory not found in {project}\n"
+            "Run 'floop init' to initialize a floop project."
+        )
+
+    # Load configuration from .floop/floop.env
+    server_url, project_key, api_key = get_review_env(project)
+    missing = []
+    if not server_url:
+        missing.append("FLOOP_SERVER_URL")
+    if not project_key:
+        missing.append("FLOOP_PROJECT_KEY")
+    if not api_key:
+        missing.append("FLOOP_API_KEY")
+
+    if missing:
+        if json_output:
+            error_payload = {
+                "error": "SETUP_REQUIRED",
+                "message": "Review settings not configured.",
+                "missing": missing,
+                "nextCommand": "floop review set",
+            }
+            click.echo(json.dumps(error_payload, indent=2, ensure_ascii=False))
+            return
+
+        click.secho("✗ Review settings not configured", fg="red", bold=True)
+        click.echo(f"  Missing: {', '.join(missing)}")
+        click.echo("")
+        click.echo("NEXT: run 'floop review set' to configure server/API key/project, then try again.")
+        return
+
+    try:
+        # Fetch versions list
+        versions = list_review_versions(
+            server_url=server_url,
+            project_key=project_key,
+            api_key=api_key,
+        )
+
+        if not versions:
+            if json_output:
+                click.echo(json.dumps({"comments": [], "message": "No versions found."}, indent=2))
+                return
+
+            click.secho("ℹ No versions found for this project.", fg="yellow")
+            click.echo("  Publish a version first with 'floop review'.")
+            return
+
+        # Find the target version
+        if version:
+            # User specified a version label
+            target_version = None
+            for v in versions:
+                if v.get("versionLabel") == version:
+                    target_version = v
+                    break
+            if not target_version:
+                if json_output:
+                    error_payload = {
+                        "error": "VERSION_NOT_FOUND",
+                        "message": f"Version '{version}' not found.",
+                        "availableVersions": [v.get("versionLabel") or v.get("versionId") for v in versions],
+                    }
+                    click.echo(json.dumps(error_payload, indent=2, ensure_ascii=False))
+                    return
+
+                click.secho(f"✗ Version '{version}' not found", fg="red", bold=True)
+                click.echo("\nAvailable versions:")
+                for v in versions:
+                    label = v.get("versionLabel") or v.get("versionId")
+                    click.echo(f"  - {label}")
+                return
+        else:
+            # Use the latest version
+            target_version = max(versions, key=lambda v: v.get("uploadedAt") or "")
+
+        version_id = target_version.get("versionId")
+        version_label = target_version.get("versionLabel") or version_id
+
+        # Fetch comments for this version
+        comments = get_review_comments(
+            server_url=server_url,
+            project_key=project_key,
+            version_id=version_id,
+            api_key=api_key,
+        )
+
+        if json_output:
+            output_payload = {
+                "versionId": version_id,
+                "versionLabel": version_label,
+                "commentCount": len(comments),
+                "comments": comments,
+            }
+            click.echo(json.dumps(output_payload, indent=2, ensure_ascii=False))
+            return
+
+        # Human-readable output
+        if not comments:
+            click.secho(f"ℹ No comments yet for version '{version_label}'", fg="yellow")
+            click.echo("")
+            click.echo("Share the review link with reviewers and check back later.")
+            return
+
+        # Count by status
+        open_count = sum(1 for c in comments if c.get("status") == "open")
+        in_review_count = sum(1 for c in comments if c.get("status") == "in_review")
+        resolved_count = sum(1 for c in comments if c.get("status") == "resolved")
+
+        # Count by priority
+        critical_count = sum(1 for c in comments if c.get("priority") == "critical")
+        high_count = sum(1 for c in comments if c.get("priority") == "high")
+        medium_count = sum(1 for c in comments if c.get("priority") == "medium")
+        low_count = sum(1 for c in comments if c.get("priority") == "low")
+
+        click.secho(f"📝 Review Feedback for '{version_label}'", fg="cyan", bold=True)
+        click.echo("")
+        click.echo(f"Total comments: {len(comments)}")
+        click.echo(f"  Open: {open_count} | In review: {in_review_count} | Resolved: {resolved_count}")
+        click.echo(f"  Priority: Critical: {critical_count} | High: {high_count} | Medium: {medium_count} | Low: {low_count}")
+        click.echo("")
+
+        # Show high-priority and critical comments
+        priority_comments = [c for c in comments if c.get("priority") in {"critical", "high"}]
+        if priority_comments:
+            click.secho("High-Priority Comments:", fg="yellow", bold=True)
+            for c in priority_comments[:10]:  # Limit to first 10
+                author = c.get("authorName") or "Anonymous"
+                body = c.get("body") or "(no text)"
+                priority = c.get("priority") or "medium"
+                labels = c.get("labels") or []
+                anchor = c.get("anchor") or {}
+                path = anchor.get("path") or "general"
+
+                priority_badge = "🔴" if priority == "critical" else "🟠"
+                labels_str = f" [{', '.join(labels)}]" if labels else ""
+                click.echo(f"  {priority_badge} {author} on {path}: {body[:80]}{labels_str}")
+            click.echo("")
+
+        click.echo("Use '--json-output' to see full comment details.")
+        click.echo("Run 'floop review' to publish an updated version after addressing feedback.")
+
+    except ReviewError as exc:
+        if json_output:
+            error_payload = {"error": "FEEDBACK_FAILED", "message": str(exc)}
+            click.echo(json.dumps(error_payload, indent=2, ensure_ascii=False))
+            raise SystemExit(1)
+
+        click.secho(f"✗ {exc}", fg="red", bold=True)
+        raise SystemExit(1)
 
 
 # ---------------------------------------------------------------------------

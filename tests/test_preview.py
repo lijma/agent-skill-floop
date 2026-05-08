@@ -1,6 +1,9 @@
 """Tests for floop.preview — index page generator."""
 
 import json
+import http.server
+import threading
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -8,8 +11,9 @@ import pytest
 from floop.preview import (
     _build_nav_html,
     _categorize_files,
+    create_preview_request_handler,
     _display_name,
-    generate_preview_index,
+    render_preview_index,
 )
 
 
@@ -282,29 +286,33 @@ class TestBuildNavHtml:
 
 
 # ---------------------------------------------------------------------------
-# generate_preview_index
+# render_preview_index
 # ---------------------------------------------------------------------------
 
 
-class TestGeneratePreviewIndex:
-    def test_creates_index_html(self, tmp_path):
-        out = generate_preview_index(tmp_path)
-        assert out == tmp_path / "index.html"
-        assert out.exists()
+class TestRenderPreviewIndex:
+    def test_renders_index_html_without_writing_file(self, tmp_path):
+        html = render_preview_index(tmp_path)
+        assert html.startswith("<!DOCTYPE html>")
+        assert not (tmp_path / "index.html").exists()
+
+    def test_html_has_build_base(self, tmp_path):
+        html = render_preview_index(tmp_path)
+        assert '<base href="/build/">' in html
 
     def test_welcome_state_when_no_files(self, tmp_path):
-        html = generate_preview_index(tmp_path).read_text(encoding="utf-8")
+        html = render_preview_index(tmp_path)
         assert "Nothing here yet" in html
         assert "floop token view" in html
 
     def test_no_welcome_state_when_files_exist(self, tmp_path):
         (tmp_path / "design-tokens.html").write_text("<html></html>", encoding="utf-8")
-        html = generate_preview_index(tmp_path).read_text(encoding="utf-8")
+        html = render_preview_index(tmp_path)
         assert "Nothing here yet" not in html
 
     def test_first_item_script_injected(self, tmp_path):
         (tmp_path / "design-tokens.html").write_text("<html></html>", encoding="utf-8")
-        html = generate_preview_index(tmp_path).read_text(encoding="utf-8")
+        html = render_preview_index(tmp_path)
         assert "_first = {" in html
         json_str = "{" + html.split("_first = {")[1].split(";")[0]
         data = json.loads(json_str)
@@ -313,57 +321,108 @@ class TestGeneratePreviewIndex:
         assert data.get("type") == "ds"
 
     def test_no_first_script_when_empty(self, tmp_path):
-        html = generate_preview_index(tmp_path).read_text(encoding="utf-8")
+        html = render_preview_index(tmp_path)
         assert "_first = {" not in html
 
     def test_design_system_section_present(self, tmp_path):
         (tmp_path / "design-tokens.html").write_text("<html></html>", encoding="utf-8")
-        html = generate_preview_index(tmp_path).read_text(encoding="utf-8")
+        html = render_preview_index(tmp_path)
         assert "Design System" in html
 
     def test_components_section_present(self, tmp_path):
         (tmp_path / "button-component.html").write_text(
             "<html></html>", encoding="utf-8"
         )
-        html = generate_preview_index(tmp_path).read_text(encoding="utf-8")
+        html = render_preview_index(tmp_path)
         assert "Components" in html
 
     def test_prototypes_section_present(self, tmp_path):
         (tmp_path / "home.html").write_text("<html></html>", encoding="utf-8")
-        html = generate_preview_index(tmp_path).read_text(encoding="utf-8")
+        html = render_preview_index(tmp_path)
         assert "Prototypes" in html
 
     def test_index_html_excluded_from_nav(self, tmp_path):
         # If there's already an index.html it should not appear in the nav
         (tmp_path / "index.html").write_text("<html></html>", encoding="utf-8")
-        html = generate_preview_index(tmp_path).read_text(encoding="utf-8")
+        html = render_preview_index(tmp_path)
         # index.html should not appear as a nav link (no data-url for it)
         assert 'data-url="index.html"' not in html
 
-    def test_overwrite_existing_index(self, tmp_path):
+    def test_existing_index_is_not_overwritten(self, tmp_path):
         out = tmp_path / "index.html"
         out.write_text("old content", encoding="utf-8")
-        generate_preview_index(tmp_path)
-        assert "old content" not in out.read_text(encoding="utf-8")
-        assert "floop" in out.read_text(encoding="utf-8")
+        html = render_preview_index(tmp_path)
+        assert out.read_text(encoding="utf-8") == "old content"
+        assert "floop" in html
 
     def test_html_has_sidebar_structure(self, tmp_path):
-        html = generate_preview_index(tmp_path).read_text(encoding="utf-8")
+        html = render_preview_index(tmp_path)
         assert 'class="sidebar"' in html
         assert 'class="main"' in html
         assert 'id="sidebar-nav"' in html
         assert 'id="frame-wrap"' in html
 
     def test_html_is_valid_doctype(self, tmp_path):
-        html = generate_preview_index(tmp_path).read_text(encoding="utf-8")
+        html = render_preview_index(tmp_path)
         assert html.startswith("<!DOCTYPE html>")
 
     def test_file_names_html_escaped_in_nav(self, tmp_path):
         # Filename with & would be a rare edge case but coverage matters
         (tmp_path / "home.html").write_text("<html></html>", encoding="utf-8")
-        html = generate_preview_index(tmp_path).read_text(encoding="utf-8")
+        html = render_preview_index(tmp_path)
         # Normal names should just appear as-is
         assert "home.html" in html
+
+
+class TestPreviewRequestHandler:
+    def _request(self, handler, path: str) -> tuple[int, str]:
+        server = http.server.HTTPServer(("127.0.0.1", 0), handler)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.handle_request)
+        thread.start()
+        try:
+            response = urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=5)
+            return response.status, response.read().decode("utf-8")
+        finally:
+            server.server_close()
+            thread.join(timeout=5)
+
+    def test_serves_virtual_index_at_root(self, tmp_path):
+        floop_dir = tmp_path / ".floop"
+        build_dir = floop_dir / "build"
+        build_dir.mkdir(parents=True)
+        (build_dir / "home.html").write_text("<html></html>", encoding="utf-8")
+
+        handler = create_preview_request_handler(floop_dir, build_dir)
+        status, body = self._request(handler, "/")
+
+        assert status == 200
+        assert "floop preview" in body
+        assert "home.html" in body
+        assert not (build_dir / "index.html").exists()
+
+    def test_serves_virtual_index_at_build_index(self, tmp_path):
+        floop_dir = tmp_path / ".floop"
+        build_dir = floop_dir / "build"
+        build_dir.mkdir(parents=True)
+
+        handler = create_preview_request_handler(floop_dir, build_dir, active_version="v1.0")
+        status, body = self._request(handler, "/build/index.html")
+
+        assert status == 200
+        assert 'var _activeVersion = "v1.0";' in body
+
+    def test_delegates_static_build_files(self, tmp_path):
+        floop_dir = tmp_path / ".floop"
+        build_dir = floop_dir / "build"
+        build_dir.mkdir(parents=True)
+        (build_dir / "home.html").write_text("<html>Home</html>", encoding="utf-8")
+
+        handler = create_preview_request_handler(floop_dir, build_dir)
+        status, body = self._request(handler, "/build/home.html")
+
+        assert status == 200
+        assert "Home" in body
 
 
 # ---------------------------------------------------------------------------
@@ -510,7 +569,7 @@ class TestBuildSitemapNavHtml:
 
 
 # ---------------------------------------------------------------------------
-# generate_preview_index — with journey domains
+# render_preview_index — with journey domains
 # ---------------------------------------------------------------------------
 
 
@@ -529,7 +588,7 @@ class TestGeneratePreviewIndexWithDomains:
             tmp_path,
             "domain,page_id,title,html_file\nauth,login,Login,build/journey/auth/login.html\n",
         )
-        html = generate_preview_index(build_dir).read_text(encoding="utf-8")
+        html = render_preview_index(build_dir)
         assert "Sitemap" in html
 
     def test_domain_nav_item_present(self, tmp_path):
@@ -537,7 +596,7 @@ class TestGeneratePreviewIndexWithDomains:
             tmp_path,
             "domain,page_id,title,html_file\nauth,login,Login,build/journey/auth/login.html\n",
         )
-        html = generate_preview_index(build_dir).read_text(encoding="utf-8")
+        html = render_preview_index(build_dir)
         assert 'data-domain="auth"' in html
 
     def test_domains_json_injected(self, tmp_path):
@@ -545,7 +604,7 @@ class TestGeneratePreviewIndexWithDomains:
             tmp_path,
             "domain,page_id,title,html_file\nauth,login,Login,build/journey/auth/login.html\n",
         )
-        html = generate_preview_index(build_dir).read_text(encoding="utf-8")
+        html = render_preview_index(build_dir)
         assert "var _domains" in html
         assert '"auth"' in html
 
@@ -554,7 +613,7 @@ class TestGeneratePreviewIndexWithDomains:
             tmp_path,
             "domain,page_id,title,html_file\nauth,login,Login,build/journey/auth/login.html\n",
         )
-        html = generate_preview_index(build_dir).read_text(encoding="utf-8")
+        html = render_preview_index(build_dir)
         assert '"domain"' in html
         assert '"auth"' in html
 
@@ -567,7 +626,7 @@ class TestGeneratePreviewIndexWithDomains:
         journey = build_dir / "journey" / "auth"
         journey.mkdir(parents=True)
         (journey / "login.html").write_text("<html></html>", encoding="utf-8")
-        html = generate_preview_index(build_dir).read_text(encoding="utf-8")
+        html = render_preview_index(build_dir)
         # "Prototypes" section should not appear since CSV provides domain structure
         assert "Prototypes" not in html
 
@@ -577,7 +636,7 @@ class TestGeneratePreviewIndexWithDomains:
             "domain,page_id,title,html_file\nauth,login,Login,build/journey/auth/login.html\n",
         )
         (build_dir / "design-tokens.html").write_text("<html></html>", encoding="utf-8")
-        html = generate_preview_index(build_dir).read_text(encoding="utf-8")
+        html = render_preview_index(build_dir)
         assert "Design System" in html
 
     def test_toolbar_controls_present(self, tmp_path):
@@ -585,7 +644,7 @@ class TestGeneratePreviewIndexWithDomains:
             tmp_path,
             "domain,page_id,title,html_file\nauth,login,Login,build/journey/auth/login.html\n",
         )
-        html = generate_preview_index(build_dir).read_text(encoding="utf-8")
+        html = render_preview_index(build_dir)
         assert 'id="toolbar-controls"' in html
         assert 'id="page-select"' in html
         assert 'id="fullscreen-btn"' in html
@@ -594,7 +653,7 @@ class TestGeneratePreviewIndexWithDomains:
         build_dir = tmp_path / "build"
         build_dir.mkdir()
         (build_dir / "home.html").write_text("<html></html>", encoding="utf-8")
-        html = generate_preview_index(build_dir).read_text(encoding="utf-8")
+        html = render_preview_index(build_dir)
         assert "Sitemap" not in html
 
 
@@ -688,7 +747,7 @@ class TestVersionHelpers:
         assert first is not None
         assert first["type"] == "version-history"
 
-    def test_generate_preview_index_with_versions(self, tmp_path):
+    def test_render_preview_index_with_versions(self, tmp_path):
         build_dir = tmp_path / "build"
         build_dir.mkdir()
         (build_dir / "home.html").write_text("<html></html>", encoding="utf-8")
@@ -698,23 +757,23 @@ class TestVersionHelpers:
             '{"version": "v1.0", "message": "first", "created_at": "2026-01-01T00:00:00+00:00"}',
             encoding="utf-8",
         )
-        html = generate_preview_index(build_dir).read_text(encoding="utf-8")
+        html = render_preview_index(build_dir)
         assert 'value="v1.0"' in html
 
-    def test_generate_preview_index_with_changehistory(self, tmp_path):
+    def test_render_preview_index_with_changehistory(self, tmp_path):
         build_dir = tmp_path / "build"
         build_dir.mkdir()
         (build_dir / "_changehistory.json").write_text(
             '{"versions": [{"version": "v1.0", "date": "2026-01-01", "message": "init"}]}',
             encoding="utf-8",
         )
-        html = generate_preview_index(build_dir).read_text(encoding="utf-8")
+        html = render_preview_index(build_dir)
         assert "Version History" in html
         assert '_first' in html
         data = json.loads("{" + html.split("_first = {")[1].split(";")[0])
         assert data["type"] == "version-history"
 
-    def test_generate_preview_index_first_item_priority(self, tmp_path):
+    def test_render_preview_index_first_item_priority(self, tmp_path):
         """version-history first_item takes priority over domains and categories."""
         build_dir = tmp_path / "build"
         build_dir.mkdir()
@@ -722,12 +781,12 @@ class TestVersionHelpers:
         (build_dir / "_changehistory.json").write_text(
             '{"versions": [{"version": "v1.0"}]}', encoding="utf-8"
         )
-        html = generate_preview_index(build_dir).read_text(encoding="utf-8")
+        html = render_preview_index(build_dir)
         data = json.loads("{" + html.split("_first = {")[1].split(";")[0])
         assert data["type"] == "version-history"
 
     def test_generate_preview_active_version(self, tmp_path):
         build_dir = tmp_path / "build"
         build_dir.mkdir()
-        html = generate_preview_index(build_dir, active_version="v1.0").read_text(encoding="utf-8")
+        html = render_preview_index(build_dir, active_version="v1.0")
         assert '"v1.0"' in html
