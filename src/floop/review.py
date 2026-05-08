@@ -492,10 +492,11 @@ def list_review_versions(
 
     normalized_server = normalize_server_url(server_url)
     encoded_project = urllib.parse.quote(project_key.strip(), safe="")
-    url = f"{normalized_server}/api/v1/me/projects/{encoded_project}/versions"
+    path = f"/api/v1/me/projects/{encoded_project}/versions"
 
     response_data = _request_json(
-        url=url,
+        server_url=normalized_server,
+        path=path,
         method="GET",
         api_key=api_key,
         timeout=timeout,
@@ -536,10 +537,11 @@ def get_review_comments(
     normalized_server = normalize_server_url(server_url)
     encoded_project = urllib.parse.quote(project_key.strip(), safe="")
     encoded_version = urllib.parse.quote(version_id.strip(), safe="")
-    url = f"{normalized_server}/api/v1/me/projects/{encoded_project}/versions/{encoded_version}/comments"
+    path = f"/api/v1/me/projects/{encoded_project}/versions/{encoded_version}/comments"
 
     response_data = _request_json(
-        url=url,
+        server_url=normalized_server,
+        path=path,
         method="GET",
         api_key=api_key,
         timeout=timeout,
